@@ -1,0 +1,46 @@
+name: android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - prime
+    paths:
+      - "DiscordChatExporter.Android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    branches:
+      - prime
+    paths:
+      - "DiscordChatExporter.Android/**"
+      - ".github/workflows/android.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: DiscordChatExporter.Android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The runner image ships with JDK 17 and the Android SDK (ANDROID_HOME)
+      - name: Test
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Build APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DiscordChatExporter.Android
+          path: DiscordChatExporter.Android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
