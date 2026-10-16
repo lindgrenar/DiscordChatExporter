@@ -11,15 +11,27 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-enum class ExportFormat {
-    /** One self-contained .html file with every attachment embedded in it. */
-    SingleHtml,
-
-    /** A .zip with the .html file plus a folder of attachments it links to. */
-    ZipArchive,
+enum class ExportFormat(val extension: String, val mimeType: String) {
+    Html("html", "text/html"),
+    Json("json", "application/json"),
+    Xml("xml", "text/xml"),
 }
 
 enum class ExportTheme { Dark, Light }
+
+data class ExportOptions(
+    val format: ExportFormat,
+    val theme: ExportTheme = ExportTheme.Dark,
+    /** Download attachments, avatars, emoji and embed media; otherwise they stay as links to Discord. */
+    val downloadAssets: Boolean = true,
+    /** HTML only: embed downloaded assets in the .html file itself instead of packaging a ZIP. */
+    val singleFile: Boolean = true,
+) {
+    /** Downloaded assets go into a ZIP next to the main file, except for single-file HTML. */
+    val isZip get() = downloadAssets && !(format == ExportFormat.Html && singleFile)
+    val outputExtension get() = if (isZip) "zip" else format.extension
+    val outputMimeType get() = if (isZip) "application/zip" else format.mimeType
+}
 
 data class ExportProgress(val fraction: Double, val messages: Long, val assets: Int)
 
@@ -28,63 +40,85 @@ fun interface TemplateSource {
     fun read(name: String): String
 }
 
-/** Port of ChannelExporter, specialized for exporting a whole DM channel to HTML. */
+/** Leaves every asset as a link to its original location. */
+private object LinkedAssetSink : AssetSink {
+    override fun resolve(url: String) = url
+    override val count = 0
+}
+
+/** Port of ChannelExporter, specialized for exporting a whole DM channel. */
 class ChannelExporter(private val templates: TemplateSource) {
     fun export(
         client: DiscordClient,
         channel: Channel,
         me: User?,
         output: OutputStream,
-        format: ExportFormat,
-        theme: ExportTheme,
+        options: ExportOptions,
         baseName: String,
         tempDir: File,
         cancellation: CancellationSignal,
         onProgress: (ExportProgress) -> Unit,
     ) {
-        val css = templates.read(if (theme == ExportTheme.Dark) "theme-dark.css" else "theme-light.css")
-        val head = templates.read("head.html")
         val downloader = AssetDownloader(File(tempDir, "assets"), cancellation)
 
-        fun run(stream: OutputStream, assets: AssetSink, trailer: String) {
-            val context = ExportContext(client, assets)
-            val renderer = HtmlRenderer(stream, context, assets, css, head)
-            renderer.writePreamble(channel, me)
+        fun createWriter(stream: OutputStream, context: ExportContext, assets: AssetSink, trailer: String): MessageWriter =
+            when (options.format) {
+                ExportFormat.Html -> HtmlRenderer(
+                    stream, context, assets,
+                    css = templates.read(if (options.theme == ExportTheme.Dark) "theme-dark.css" else "theme-light.css"),
+                    headHtml = templates.read("head.html"),
+                    trailer = trailer,
+                )
+                ExportFormat.Json -> DataWriter(stream, isXml = false, context, assets)
+                ExportFormat.Xml -> DataWriter(stream, isXml = true, context, assets)
+            }
+
+        fun run(stream: OutputStream, assets: AssetSink, trailer: String = "") {
+            val writer = createWriter(stream, ExportContext(client, assets), assets, trailer)
+            writer.writePreamble(channel, me)
             var lastFraction = 0.0
             client.forEachMessage(
                 channel.id,
                 onProgress = { lastFraction = it },
                 onMessage = {
-                    renderer.writeMessage(it)
-                    onProgress(ExportProgress(lastFraction, renderer.messagesWritten, assets.count))
+                    writer.writeMessage(it)
+                    onProgress(ExportProgress(lastFraction, writer.messagesWritten, assets.count))
                 },
             )
-            renderer.writePostamble(trailer)
-            onProgress(ExportProgress(1.0, renderer.messagesWritten, assets.count))
+            writer.writePostamble()
+            onProgress(ExportProgress(1.0, writer.messagesWritten, assets.count))
         }
 
-        when (format) {
-            ExportFormat.SingleHtml -> {
+        when {
+            !options.downloadAssets -> {
+                val stream = BufferedOutputStream(output, 64 * 1024)
+                run(stream, LinkedAssetSink)
+                stream.flush()
+            }
+
+            !options.isZip -> {
                 val stream = BufferedOutputStream(output, 64 * 1024)
                 run(stream, EmbeddedAssetSink(downloader), EmbeddedAssetSink.RESOLVER_SCRIPT)
                 stream.flush()
             }
 
-            ExportFormat.ZipArchive -> {
-                // Assets go into the archive as they're downloaded; the HTML is staged in a temp
+            else -> {
+                // Assets go into the archive as they're downloaded; the main file is staged in a temp
                 // file and added last, because ZIP entries can't be written concurrently.
+                val fileName = "$baseName.${options.format.extension}"
                 val zip = ZipOutputStream(BufferedOutputStream(output, 64 * 1024))
-                val htmlFile = File(tempDir, "export.html")
-                htmlFile.outputStream().buffered().use { html ->
-                    run(html, ZipAssetSink(downloader, zip, "$baseName.html_Files"), "")
+                val staged = File(tempDir, "export.tmp")
+                tempDir.mkdirs()
+                staged.outputStream().buffered().use { stream ->
+                    run(stream, ZipAssetSink(downloader, zip, "${fileName}_Files"))
                 }
                 zip.setLevel(Deflater.DEFAULT_COMPRESSION)
-                zip.putNextEntry(ZipEntry("$baseName.html"))
-                htmlFile.inputStream().use { it.copyTo(zip) }
+                zip.putNextEntry(ZipEntry(fileName))
+                staged.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
                 zip.finish()
                 zip.flush()
-                htmlFile.delete()
+                staged.delete()
             }
         }
     }

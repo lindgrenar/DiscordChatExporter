@@ -14,6 +14,13 @@ object ImageCdn {
 
     private fun ext(hash: String) = if (hash.startsWith("a_")) "gif" else "png"
 
+    // Standard emoji are rendered through Twemoji. Variant selectors are dropped unless the emoji has a ZWJ.
+    fun standardEmojiUrl(name: String): String {
+        val codePoints = name.codePoints().toArray().toList()
+        val filtered = if (0x200d in codePoints) codePoints else codePoints.filter { it != 0xfe0f }
+        return "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/svg/${filtered.joinToString("-") { Integer.toHexString(it) }}.svg"
+    }
+
     fun customEmojiUrl(id: String, isAnimated: Boolean) =
         "$baseUrl/emojis/$id.${if (isAnimated) "gif" else "png"}"
 
@@ -316,6 +323,7 @@ data class MessageSnapshot(
     val editedTimestamp: Instant?,
     val content: String,
     val attachments: List<Attachment>,
+    val embeds: List<Embed>,
     val stickers: List<Sticker>,
 ) {
     companion object {
@@ -324,6 +332,7 @@ data class MessageSnapshot(
             editedTimestamp = json.instant("edited_timestamp"),
             content = json.str("content") ?: "",
             attachments = json.list("attachments", Attachment::parse),
+            embeds = Embed.normalize(json.list("embeds", Embed::parse)),
             stickers = json.list("sticker_items", Sticker::parse),
         )
     }
@@ -345,9 +354,12 @@ data class Message(
     val reactions: List<Reaction>,
     val mentionedUsers: List<User>,
     val referenceMessageId: String?,
-    val referenceKind: Int,
+    val referenceChannelId: String?,
+    val referenceGuildId: String?,
+    val referenceKind: Int?,
     val referencedMessage: Message?,
     val forwardedMessage: MessageSnapshot?,
+    val interactionId: String?,
     val interactionName: String?,
     val interactionUser: User?,
     val poll: Poll?,
@@ -404,9 +416,12 @@ data class Message(
                 reactions = json.list("reactions", Reaction::parse),
                 mentionedUsers = json.list("mentions", User::parse),
                 referenceMessageId = reference?.nonBlank("message_id"),
-                referenceKind = reference?.optInt("type", 0) ?: 0,
+                referenceChannelId = reference?.nonBlank("channel_id"),
+                referenceGuildId = reference?.nonBlank("guild_id"),
+                referenceKind = reference?.optInt("type", 0),
                 referencedMessage = json.obj("referenced_message")?.let(::parse),
                 forwardedMessage = snapshot?.let(MessageSnapshot::parse),
+                interactionId = interaction?.nonBlank("id"),
                 interactionName = interaction?.str("name"),
                 interactionUser = interaction?.obj("user")?.let(User::parse),
                 poll = json.obj("poll")?.let(Poll::parse),

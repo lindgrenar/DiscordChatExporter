@@ -1,14 +1,9 @@
 name: android
 
+# Builds the APK once, when Android changes are merged into prime
 on:
   workflow_dispatch:
   push:
-    branches:
-      - prime
-    paths:
-      - "DiscordChatExporter.Android/**"
-      - ".github/workflows/android.yml"
-  pull_request:
     branches:
       - prime
     paths:

@@ -1,15 +1,8 @@
 name: main
 
+# Desktop builds are manual-only in this fork; run them from the Actions tab when needed
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - prime
-    tags:
-      - "*"
-  pull_request:
-    branches:
-      - prime
 
 env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true

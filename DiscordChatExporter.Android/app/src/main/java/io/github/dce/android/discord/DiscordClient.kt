@@ -6,6 +6,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.net.UnknownHostException
 import java.time.Duration
 
@@ -172,6 +173,23 @@ class DiscordClient(
             .map(Channel::parse)
             .filter { it.isDirect }
             .sortedWith { a, b -> Snowflake.compare(b.lastMessageId ?: b.id, a.lastMessageId ?: a.id) }
+
+    /** Users who reacted with [emoji] to a message. Port of DiscordClient.GetMessageReactionsAsync. */
+    fun getReactionUsers(channelId: String, messageId: String, emoji: Emoji): List<User> {
+        val reactionName = URLEncoder.encode(if (emoji.id != null) "${emoji.name}:${emoji.id}" else emoji.name, "UTF-8")
+            .replace("+", "%20")
+        val users = mutableListOf<User>()
+        var after = "0"
+        while (true) {
+            // Can fail for reactions whose emoji has since been deleted
+            val page = tryGetText("channels/$channelId/messages/$messageId/reactions/$reactionName?limit=100&after=$after")
+                ?.let { JSONArray(it).objects().map(User::parse) }
+                .orEmpty()
+            if (page.isEmpty()) return users
+            users += page
+            after = page.last().id
+        }
+    }
 
     private fun parseMessages(text: String): List<Message> = JSONArray(text).objects().map(Message::parse)
 

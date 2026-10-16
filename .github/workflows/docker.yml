@@ -1,15 +1,8 @@
 name: docker
 
+# Desktop builds are manual-only in this fork; run them from the Actions tab when needed
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - prime
-    tags:
-      - "*"
-  pull_request:
-    branches:
-      - prime
 
 jobs:
   # Outputs from this job aren't really used, but it's here to verify that the Dockerfile builds correctly
