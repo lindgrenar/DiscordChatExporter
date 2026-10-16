@@ -58,6 +58,8 @@ class ExportEndToEndTest {
         val path = request.path.removePrefix("/api/")
         return when (path) {
             "users/@me" -> json(me)
+            // On-demand lookup for mentioned users that haven't appeared in the chat yet
+            "users/2" -> json(alice)
             "channels/100" -> json(JSONObject().put("id", "100").put("type", 1).put("recipients", JSONArray().put(alice)))
             "channels/100/messages" -> {
                 val q = request.query
@@ -70,7 +72,11 @@ class ExportEndToEndTest {
                     ?: messages.takeLast(limit)
                 json(JSONArray(page.reversed()))
             }
-            else -> json(JSONObject(), 404)
+            else -> when {
+                path.startsWith("channels/100/messages/") && "/reactions/" in path ->
+                    json(if (request.query["after"] == "0") JSONArray().put(alice) else JSONArray())
+                else -> json(JSONObject(), 404)
+            }
         }
     }
 
@@ -123,14 +129,14 @@ class ExportEndToEndTest {
         ImageCdn.baseUrl = "https://cdn.discordapp.com"
     }
 
-    private fun export(format: ExportFormat, cancellation: CancellationSignal = CancellationSignal { false }): ByteArray {
+    private fun export(options: ExportOptions, cancellation: CancellationSignal = CancellationSignal { false }): ByteArray {
         val client = DiscordClient("secret", cancellation, "$base/api/")
         val channel = client.getChannel("100")
         val output = ByteArrayOutputStream()
         val tempDir = Files.createTempDirectory("dce-test").toFile()
         var lastProgress: ExportProgress? = null
         ChannelExporter(templates).export(
-            client, channel, client.getCurrentUser(), output, format, ExportTheme.Dark,
+            client, channel, client.getCurrentUser(), output, options,
             ChannelExporter.defaultBaseName(channel), tempDir, cancellation,
         ) { lastProgress = it }
         assertEquals(250L, lastProgress?.messages)
@@ -141,7 +147,7 @@ class ExportEndToEndTest {
 
     @Test
     fun singleHtmlEmbedsEveryAssetOnce() {
-        val html = export(ExportFormat.SingleHtml).toString(Charsets.UTF_8)
+        val html = export(ExportOptions(ExportFormat.Html)).toString(Charsets.UTF_8)
         File("build/test-output").mkdirs()
         File("build/test-output/export.html").writeText(html)
 
@@ -182,7 +188,7 @@ class ExportEndToEndTest {
 
     @Test
     fun zipContainsHtmlAndAssetFolder() {
-        val zipBytes = export(ExportFormat.ZipArchive)
+        val zipBytes = export(ExportOptions(ExportFormat.Html, singleFile = false))
         val entries = mutableMapOf<String, ByteArray>()
         ZipInputStream(zipBytes.inputStream()).use { zip ->
             while (true) {
@@ -199,8 +205,89 @@ class ExportEndToEndTest {
         assertTrue(entries[assetEntries.single { "photo-" in it }]!!.contentEquals(png))
     }
 
+    private fun unzip(bytes: ByteArray): Map<String, ByteArray> {
+        val entries = mutableMapOf<String, ByteArray>()
+        ZipInputStream(bytes.inputStream()).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                entries[entry.name] = zip.readBytes()
+            }
+        }
+        return entries
+    }
+
+    @Test
+    fun jsonWithoutDownloadsIsOneFileLinkingToDiscord() {
+        val root = JSONObject(export(ExportOptions(ExportFormat.Json, downloadAssets = false)).toString(Charsets.UTF_8))
+        assertEquals(0, assetRequests.get())
+
+        assertEquals("Direct Messages", root.getJSONObject("guild").getString("name"))
+        assertEquals("DirectTextChat", root.getJSONObject("channel").getString("type"))
+        assertEquals(250, root.getInt("messageCount"))
+        val messages = root.getJSONArray("messages")
+        assertEquals(250, messages.length())
+
+        val first = messages.getJSONObject(0)
+        assertEquals("Default", first.getString("type"))
+        // ISO 8601 with the device's offset, like the desktop app
+        assertEquals(Instant.parse("2024-01-01T12:00:00Z"), java.time.OffsetDateTime.parse(first.getString("timestamp")).toInstant())
+        assertTrue(first.getString("timestamp"), Regex("""\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d""").matches(first.getString("timestamp")))
+        // Mentions are resolved, other markdown is kept as written (like the desktop app)
+        assertEquals("Message #0 with **bold** and @Alice", first.getString("content"))
+        assertEquals("me", first.getJSONObject("author").getString("name"))
+        assertEquals("0000", first.getJSONObject("author").getString("discriminator"))
+        assertEquals("$base/cdn/attachments/1/photo.png?ex=1&is=2&hm=3", first.getJSONArray("attachments").getJSONObject(0).getString("url"))
+
+        val emojiMessage = messages.getJSONObject(2)
+        assertEquals(":wave: :wave:", emojiMessage.getString("content"))
+        assertEquals(1, emojiMessage.getJSONArray("inlineEmojis").length())
+
+        val reply = messages.getJSONObject(4)
+        assertEquals("Reply", reply.getString("type"))
+
+        assertEquals("Started a call that lasted 10 minutes.", messages.getJSONObject(6).getString("content"))
+
+        val reaction = messages.getJSONObject(7).getJSONArray("reactions").getJSONObject(0)
+        assertEquals(2, reaction.getInt("count"))
+        assertEquals("alice", reaction.getJSONArray("users").getJSONObject(0).getString("name"))
+        assertTrue(reaction.getJSONObject("emoji").getString("imageUrl").endsWith("/1f44d.svg"))
+
+        val embed = messages.getJSONObject(5).getJSONArray("embeds").getJSONObject(0)
+        assertEquals("#5865F2", embed.getString("color"))
+        assertEquals("Embed *description*", embed.getString("description"))
+    }
+
+    @Test
+    fun jsonWithDownloadsIsZipWithFilesFolder() {
+        val entries = unzip(export(ExportOptions(ExportFormat.Json)))
+        val name = "Direct Messages - Alice [100].json"
+        val root = JSONObject(entries[name]!!.toString(Charsets.UTF_8))
+        val photoUrl = root.getJSONArray("messages").getJSONObject(0).getJSONArray("attachments").getJSONObject(0).getString("url")
+        assertTrue(photoUrl, photoUrl.startsWith("Direct%20Messages%20-%20Alice%20%5B100%5D.json_Files/photo-"))
+        val photo = entries.keys.single { it.startsWith("${name}_Files/photo-") }
+        assertTrue(entries[photo]!!.contentEquals(png))
+        // The failed download keeps its original link
+        assertTrue(entries[name]!!.toString(Charsets.UTF_8).contains("$base/cdn/attachments/1/missing.png"))
+    }
+
+    @Test
+    fun xmlIsWellFormedAndComplete() {
+        val bytes = export(ExportOptions(ExportFormat.Xml, downloadAssets = false))
+        val document = javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(bytes.inputStream())
+        val root = document.documentElement
+        assertEquals("export", root.tagName)
+        val messages = root.getElementsByTagName("message")
+        assertEquals(250, messages.length)
+        assertEquals("250", root.getElementsByTagName("messageCount").item(0).textContent)
+
+        val first = messages.item(0) as org.w3c.dom.Element
+        assertEquals("Message #0 with **bold** and @Alice", first.getElementsByTagName("content").item(0).textContent)
+        assertEquals("photo.png", first.getElementsByTagName("attachment").item(0).let { (it as org.w3c.dom.Element).getElementsByTagName("fileName").item(0).textContent })
+        assertEquals(0, assetRequests.get())
+    }
+
     @Test(expected = CancelledException::class)
     fun cancellationStopsTheExport() {
-        export(ExportFormat.SingleHtml) { messageRequests.get() > 2 }
+        export(ExportOptions(ExportFormat.Html)) { messageRequests.get() > 2 }
     }
 }

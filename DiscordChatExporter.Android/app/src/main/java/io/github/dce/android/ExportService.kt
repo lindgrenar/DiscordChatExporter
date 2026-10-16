@@ -19,6 +19,7 @@ import io.github.dce.android.discord.CancelledException
 import io.github.dce.android.discord.DiscordClient
 import io.github.dce.android.export.ChannelExporter
 import io.github.dce.android.export.ExportFormat
+import io.github.dce.android.export.ExportOptions
 import io.github.dce.android.export.ExportTheme
 import io.github.dce.android.export.TemplateSource
 import java.io.File
@@ -37,6 +38,8 @@ class ExportService : Service() {
         private const val EXTRA_BASE_NAME = "base_name"
         private const val EXTRA_FORMAT = "format"
         private const val EXTRA_THEME = "theme"
+        private const val EXTRA_DOWNLOAD = "download"
+        private const val EXTRA_SINGLE_FILE = "single_file"
         private const val NOTIFICATION_CHANNEL = "export"
         private const val PROGRESS_NOTIFICATION_ID = 1
         private const val RESULT_NOTIFICATION_ID = 2
@@ -47,8 +50,7 @@ class ExportService : Service() {
             channelName: String,
             baseName: String,
             output: Uri,
-            format: ExportFormat,
-            theme: ExportTheme,
+            options: ExportOptions,
         ) {
             val intent = Intent(context, ExportService::class.java)
                 .setAction(ACTION_START)
@@ -57,8 +59,10 @@ class ExportService : Service() {
                 .putExtra(EXTRA_CHANNEL_ID, channelId)
                 .putExtra(EXTRA_CHANNEL_NAME, channelName)
                 .putExtra(EXTRA_BASE_NAME, baseName)
-                .putExtra(EXTRA_FORMAT, format.name)
-                .putExtra(EXTRA_THEME, theme.name)
+                .putExtra(EXTRA_FORMAT, options.format.name)
+                .putExtra(EXTRA_THEME, options.theme.name)
+                .putExtra(EXTRA_DOWNLOAD, options.downloadAssets)
+                .putExtra(EXTRA_SINGLE_FILE, options.singleFile)
             context.startForegroundService(intent)
         }
 
@@ -95,14 +99,18 @@ class ExportService : Service() {
 
         val channelName = intent.getStringExtra(EXTRA_CHANNEL_NAME) ?: channelId
         val baseName = intent.getStringExtra(EXTRA_BASE_NAME) ?: channelId
-        val format = ExportFormat.valueOf(intent.getStringExtra(EXTRA_FORMAT) ?: ExportFormat.SingleHtml.name)
-        val theme = ExportTheme.valueOf(intent.getStringExtra(EXTRA_THEME) ?: ExportTheme.Dark.name)
+        val options = ExportOptions(
+            format = ExportFormat.valueOf(intent.getStringExtra(EXTRA_FORMAT) ?: ExportFormat.Html.name),
+            theme = ExportTheme.valueOf(intent.getStringExtra(EXTRA_THEME) ?: ExportTheme.Dark.name),
+            downloadAssets = intent.getBooleanExtra(EXTRA_DOWNLOAD, true),
+            singleFile = intent.getBooleanExtra(EXTRA_SINGLE_FILE, true),
+        )
 
         cancelled.set(false)
         ExportState.update(ExportState.Snapshot(ExportState.Phase.Running, channelName))
         startInForeground(buildProgressNotification(channelName, 0.0))
 
-        worker = Thread({ runExport(token, channelId, channelName, baseName, output, format, theme) }, "export").apply { start() }
+        worker = Thread({ runExport(token, channelId, channelName, baseName, output, options) }, "export").apply { start() }
         return START_NOT_STICKY
     }
 
@@ -112,14 +120,13 @@ class ExportService : Service() {
         channelName: String,
         baseName: String,
         output: Uri,
-        format: ExportFormat,
-        theme: ExportTheme,
+        options: ExportOptions,
     ) {
         val wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dce:export")
             .apply { acquire(6 * 60 * 60 * 1000L) }
         val tempDir = File(cacheDir, "export-${System.currentTimeMillis()}")
-        val mimeType = if (format == ExportFormat.SingleHtml) "text/html" else "application/zip"
+        val mimeType = options.outputMimeType
         val signal = CancellationSignal { cancelled.get() }
 
         val result = try {
@@ -134,7 +141,7 @@ class ExportService : Service() {
                 ?: error("Couldn't open the output file.")
             var lastUpdateAt = 0L
             stream.use {
-                ChannelExporter(templates).export(client, channel, me, it, format, theme, baseName, tempDir, signal) { progress ->
+                ChannelExporter(templates).export(client, channel, me, it, options, baseName, tempDir, signal) { progress ->
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastUpdateAt >= 200 || progress.fraction >= 1.0) {
                         lastUpdateAt = now

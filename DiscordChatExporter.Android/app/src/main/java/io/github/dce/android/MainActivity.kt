@@ -16,6 +16,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.BaseAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -30,6 +31,7 @@ import io.github.dce.android.discord.Snowflake
 import io.github.dce.android.discord.User
 import io.github.dce.android.export.ChannelExporter
 import io.github.dce.android.export.ExportFormat
+import io.github.dce.android.export.ExportOptions
 import io.github.dce.android.export.ExportTheme
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -43,7 +45,7 @@ class MainActivity : Activity() {
         private const val REQUEST_NOTIFICATIONS = 3
     }
 
-    private class PendingExport(val channel: Channel, val format: ExportFormat, val theme: ExportTheme) {
+    private class PendingExport(val channel: Channel, val options: ExportOptions) {
         val baseName = ChannelExporter.defaultBaseName(channel)
     }
 
@@ -160,7 +162,7 @@ class MainActivity : Activity() {
         logout.visibility = if (token == null) View.GONE else View.VISIBLE
         if (token == null) {
             me = null
-            account.text = "Export Discord DMs to HTML"
+            account.text = "Export Discord DMs"
             adapter.setChannels(emptyList())
         } else {
             loadChannels()
@@ -176,7 +178,7 @@ class MainActivity : Activity() {
                     TokenStore.set(this, token)
                     refreshAuthState()
                 }.onFailure {
-                    account.text = "Export Discord DMs to HTML"
+                    account.text = "Export Discord DMs"
                     toast(it.message ?: "Couldn't sign in.")
                 }
             }
@@ -254,21 +256,47 @@ class MainActivity : Activity() {
             return
         }
         val view = layoutInflater.inflate(R.layout.dialog_export, null)
+        val formatGroup = view.findViewById<RadioGroup>(R.id.format)
+        val download = view.findViewById<CheckBox>(R.id.download)
+        val downloadHint = view.findViewById<TextView>(R.id.download_hint)
+        val packagingSection = view.findViewById<View>(R.id.packaging_section)
+        val themeSection = view.findViewById<View>(R.id.theme_section)
+
+        fun selectedFormat() = when (formatGroup.checkedRadioButtonId) {
+            R.id.format_json -> ExportFormat.Json
+            R.id.format_xml -> ExportFormat.Xml
+            else -> ExportFormat.Html
+        }
+
+        fun updateVisibility() {
+            val isHtml = selectedFormat() == ExportFormat.Html
+            themeSection.visibility = if (isHtml) View.VISIBLE else View.GONE
+            packagingSection.visibility = if (isHtml && download.isChecked) View.VISIBLE else View.GONE
+            downloadHint.text = when {
+                !download.isChecked -> "Text only. Attachments stay as links to Discord, which expire after a while."
+                isHtml -> "Every attachment, avatar and emoji is saved with the export."
+                else -> "Saved as a ZIP: the ${selectedFormat().extension.uppercase()} file plus a folder of attachments it links to."
+            }
+        }
+        formatGroup.setOnCheckedChangeListener { _, _ -> updateVisibility() }
+        download.setOnCheckedChangeListener { _, _ -> updateVisibility() }
+        updateVisibility()
+
         AlertDialog.Builder(this)
             .setTitle("Export \"${channel.name}\"")
             .setView(view)
             .setPositiveButton("Choose location") { _, _ ->
-                val format = if (view.findViewById<RadioGroup>(R.id.format).checkedRadioButtonId == R.id.format_zip) {
-                    ExportFormat.ZipArchive
-                } else {
-                    ExportFormat.SingleHtml
-                }
-                val theme = if (view.findViewById<RadioGroup>(R.id.theme).checkedRadioButtonId == R.id.theme_light) {
-                    ExportTheme.Light
-                } else {
-                    ExportTheme.Dark
-                }
-                pendingExport = PendingExport(channel, format, theme)
+                val options = ExportOptions(
+                    format = selectedFormat(),
+                    theme = if (view.findViewById<RadioGroup>(R.id.theme).checkedRadioButtonId == R.id.theme_light) {
+                        ExportTheme.Light
+                    } else {
+                        ExportTheme.Dark
+                    },
+                    downloadAssets = download.isChecked,
+                    singleFile = view.findViewById<RadioGroup>(R.id.packaging).checkedRadioButtonId != R.id.packaging_zip,
+                )
+                pendingExport = PendingExport(channel, options)
                 requestNotificationPermissionThenPickFile()
             }
             .setNegativeButton("Cancel", null)
@@ -293,14 +321,10 @@ class MainActivity : Activity() {
 
     private fun pickOutputFile() {
         val export = pendingExport ?: return
-        val (mime, extension) = when (export.format) {
-            ExportFormat.SingleHtml -> "text/html" to ".html"
-            ExportFormat.ZipArchive -> "application/zip" to ".zip"
-        }
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
-            .setType(mime)
-            .putExtra(Intent.EXTRA_TITLE, export.baseName + extension)
+            .setType(export.options.outputMimeType)
+            .putExtra(Intent.EXTRA_TITLE, "${export.baseName}.${export.options.outputExtension}")
         startActivityForResult(intent, REQUEST_CREATE_DOCUMENT)
     }
 
@@ -320,7 +344,7 @@ class MainActivity : Activity() {
                     )
                 }
                 dismissedOutput = null
-                ExportService.start(this, export.channel.id, export.channel.name, export.baseName, uri, export.format, export.theme)
+                ExportService.start(this, export.channel.id, export.channel.name, export.baseName, uri, export.options)
             }
         }
     }

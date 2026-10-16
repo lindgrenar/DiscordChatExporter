@@ -1,9 +1,11 @@
 package io.github.dce.android.export
 
 import io.github.dce.android.discord.Attachment
+import io.github.dce.android.discord.CancelledException
 import io.github.dce.android.discord.Channel
 import io.github.dce.android.discord.DiscordClient
 import io.github.dce.android.discord.Embed
+import io.github.dce.android.discord.Emoji
 import io.github.dce.android.discord.Message
 import io.github.dce.android.discord.Sticker
 import io.github.dce.android.discord.User
@@ -18,6 +20,14 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/** Common shape of the HTML, JSON and XML writers (port of MessageWriter). */
+interface MessageWriter {
+    val messagesWritten: Long
+    fun writePreamble(channel: Channel, me: User?)
+    fun writeMessage(message: Message)
+    fun writePostamble()
+}
+
 /** Port of ExportContext: caches users/channels referenced by messages and formats dates. */
 class ExportContext(
     private val client: DiscordClient?,
@@ -28,6 +38,17 @@ class ExportContext(
     private val usersById = HashMap<String, User?>()
     private val channelsById = HashMap<String, Channel?>()
     private val formatters = HashMap<String, DateTimeFormatter>()
+    private val isoFormatter = DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSxxx")
+
+    // Lookups are best-effort, but cancellation must still get through
+    private fun <T> tryFetch(block: () -> T?): T? =
+        try {
+            block()
+        } catch (e: CancelledException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
 
     fun register(message: Message) {
         message.referencedUsers().forEach { usersById[it.id] = it }
@@ -38,12 +59,12 @@ class ExportContext(
     // Mentioned users aren't always included in the message, so fetch them on demand
     // https://github.com/Tyrrrz/DiscordChatExporter/issues/304
     override fun userName(id: String): Pair<String, String>? {
-        if (!usersById.containsKey(id)) usersById[id] = runCatching { client?.tryGetUser(id) }.getOrNull()
+        if (!usersById.containsKey(id)) usersById[id] = tryFetch { client?.tryGetUser(id) }
         return usersById[id]?.let { it.displayName to it.fullName }
     }
 
     override fun channelName(id: String): String? {
-        if (!channelsById.containsKey(id)) channelsById[id] = runCatching { client?.tryGetChannel(id) }.getOrNull()
+        if (!channelsById.containsKey(id)) channelsById[id] = tryFetch { client?.tryGetChannel(id) }
         return channelsById[id]?.name
     }
 
@@ -62,6 +83,12 @@ class ExportContext(
         }
         return formatter.format(instant.atZone(zone))
     }
+
+    /** ISO 8601 with the local offset, like the desktop app's JSON dates. */
+    fun isoDate(instant: Instant): String = isoFormatter.format(instant.atZone(zone))
+
+    fun reactionUsers(channelId: String, messageId: String, emoji: Emoji): List<User> =
+        tryFetch { client?.getReactionUsers(channelId, messageId, emoji) }.orEmpty()
 
     fun formatNumber(value: Number): String = NumberFormat.getIntegerInstance(locale).format(value)
 
@@ -86,11 +113,12 @@ class HtmlRenderer(
     private val assets: AssetSink,
     private val css: String,
     private val headHtml: String,
-) {
+    private val trailer: String = "",
+) : MessageWriter {
     private val writer = OutputStreamWriter(stream, Charsets.UTF_8)
     private val group = ArrayList<Message>()
 
-    var messagesWritten = 0L
+    override var messagesWritten = 0L
         private set
 
     private fun asset(url: String) = assets.resolve(url).html()
@@ -105,7 +133,7 @@ class HtmlRenderer(
         assets.flush(stream)
     }
 
-    fun writePreamble(channel: Channel, me: User?) {
+    override fun writePreamble(channel: Channel, me: User?) {
         // For one-on-one chats, use the other person's avatar as the header icon
         val other = channel.recipients.firstOrNull { it.id != me?.id } ?: channel.recipients.firstOrNull()
         val iconUrl = channel.iconUrl ?: other?.avatarUrl ?: io.github.dce.android.discord.ImageCdn.fallbackUserAvatarUrl()
@@ -140,7 +168,7 @@ class HtmlRenderer(
         return message.author.fullName == last.author.fullName
     }
 
-    fun writeMessage(message: Message) {
+    override fun writeMessage(message: Message) {
         context.register(message)
         messagesWritten++
         if (!canJoinGroup(message)) {
@@ -150,7 +178,7 @@ class HtmlRenderer(
         group += message
     }
 
-    fun writePostamble(trailer: String = "") {
+    override fun writePostamble() {
         if (group.isNotEmpty()) write(renderGroup(group))
         group.clear()
         write(

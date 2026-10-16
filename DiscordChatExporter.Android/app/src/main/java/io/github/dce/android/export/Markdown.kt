@@ -215,7 +215,56 @@ object MarkdownParser {
         return nodes
     }
 
+    // Minimal set for non-HTML formats: only the tokens that need resolving to be readable
+    private val minimalMatchers = listOf(
+        everyone, here, userMention, channelMention, roleMention,
+        customEmoji,
+        timestamp,
+    )
+
     fun parse(markdown: String): List<MdNode> = parse(markdown, 0)
+
+    fun parseMinimal(markdown: String): List<MdNode> = parse(markdown, 0, minimalMatchers)
+
+    /** Custom emoji used anywhere in [markdown], deduplicated by name. */
+    fun extractEmojis(markdown: String): List<EmojiNode> {
+        val result = mutableListOf<EmojiNode>()
+        fun visit(nodes: List<MdNode>) {
+            for (node in nodes) {
+                when (node) {
+                    is EmojiNode -> result += node
+                    is FormattingNode -> visit(node.children)
+                    is HeadingNode -> visit(node.children)
+                    is LinkNode -> visit(node.children)
+                    is ListNode -> node.items.forEach(::visit)
+                    else -> Unit
+                }
+            }
+        }
+        visit(parse(markdown))
+        return result.distinctBy { it.name }
+    }
+}
+
+/** Port of PlainTextMarkdownVisitor: resolves mentions, custom emoji and timestamps, leaving everything else as written. */
+object PlainTextMarkdown {
+    fun format(context: MarkdownContext, markdown: String): String = buildString {
+        for (node in MarkdownParser.parseMinimal(markdown)) {
+            when (node) {
+                is TextNode -> append(node.text)
+                is EmojiNode -> append(":${node.name}:")
+                is MentionNode -> when (node.kind) {
+                    MentionKind.Everyone -> append("@everyone")
+                    MentionKind.Here -> append("@here")
+                    MentionKind.User -> append("@" + (node.targetId?.let(context::userName)?.first ?: "Unknown"))
+                    MentionKind.Channel -> append("#" + (node.targetId?.let(context::channelName) ?: "deleted-channel"))
+                    MentionKind.Role -> append("@deleted-role")
+                }
+                is TimestampNode -> append(node.instant?.let { context.formatDate(it, node.format ?: "g") } ?: "Invalid date")
+                else -> Unit
+            }
+        }
+    }
 }
 
 /** Resolves the context-dependent bits of markdown (mentions, assets, dates) while rendering. */

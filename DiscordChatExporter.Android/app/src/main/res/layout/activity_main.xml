@@ -35,7 +35,7 @@
                 android:id="@+id/account"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Export Discord DMs to HTML"
+                android:text="Export Discord DMs"
                 android:textColor="@color/text_secondary"
                 android:textSize="13sp" />
         </LinearLayout>
@@ -65,7 +65,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Sign in to list your direct messages. Exports include the full history plus every attachment, avatar and emoji, saved as a single HTML file (or a ZIP)."
+                android:text="Sign in to list your direct messages. Exports include the full history plus every attachment, avatar and emoji, saved as HTML, JSON or XML."
                 android:textColor="@color/text_primary"
                 android:textSize="15sp" />
 
