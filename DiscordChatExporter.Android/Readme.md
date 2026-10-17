@@ -21,8 +21,27 @@ conversation in full**, as **HTML, JSON or XML**, optionally with every attachme
     assets are stored once and decoded lazily as you scroll) or a ZIP.
   - On, JSON/XML: a **ZIP** with the data file plus a `<name>.<ext>_Files/` folder it links to,
     matching the desktop app's layout.
+- **Export pace**: *Fast* (as fast as Discord's rate limits allow), *Normal* (100 messages per
+  second) or *Gentle* (100 messages every 3 s). This is separate from the deletion pace below;
+  each one remembers its last setting.
 - Runs as a foreground service with a progress notification, so long chats keep exporting in
   the background. Exports can be cancelled; partial files are removed.
+- **Archive**: every export is saved on the device (in app-private storage) and listed under
+  *Archive*, with its date, format, size and message count. From there you can open it, save a
+  copy anywhere (Files, SD card, …), remove it, or share it.
+- **Sharing / backup**: *Share…* opens the system share sheet, so an export goes to Google Drive,
+  Proton Drive, Dropbox, mail or any other app that accepts files. The app you pick is remembered
+  and shows up as a one-tap *Send to Drive* (or *Send to Proton Drive*, …) button after each
+  export, in the completion notification and in the archive. *Back up all* sends every archived
+  export at once.
+- **Delete my messages** (from an archived export): slowly deletes the messages *you* sent in that
+  chat from Discord, newest first, at a pace you choose (1 every 5 s, 2 s, 1 s, or custom, down to
+  0.5 s, plus a little jitter). Only messages up to the newest one in the export are touched, so
+  nothing that isn't archived gets deleted, and other people's messages are never touched (Discord
+  doesn't allow it in DMs anyway). It runs as a foreground service with a progress notification,
+  an ETA and a Stop button, keeps going for hours with the app in the background, and can be
+  stopped and resumed any time; progress is saved to the archive. Call logs and other system
+  messages can't be deleted and are skipped.
 - Includes a viewer for single-file exports, plus Share / Open with.
 
 ## What's left out (compared to the desktop app)
@@ -42,6 +61,8 @@ with the device's emoji font) and invite previews.
 | `export/HtmlRenderer.kt` | `Exporting/HtmlMessageWriter.cs`, `*Template.cshtml`, `ExportContext.cs` |
 | `export/Assets.kt` | `Exporting/ExportAssetDownloader.cs` |
 | `export/ChannelExporter.kt` | `Exporting/ChannelExporter.cs` |
+| `archive/*` | — (archive storage, content provider for sharing, remembered share target) |
+| `delete/MessageDeleter.kt`, `DeletionService.kt` | — (deleting your own messages) |
 | `src/main/assets/theme-*.css`, `head.html` | Extracted from `PreambleTemplate.cshtml` |
 
 ## Building
@@ -50,7 +71,7 @@ Requires JDK 17+ and the Android SDK (platform 35).
 
 ```sh
 cd DiscordChatExporter.Android
-./gradlew testDebugUnitTest   # markdown + end-to-end export tests against a fake Discord API
+./gradlew testDebugUnitTest   # markdown, archive, plus export and deletion tests against a fake Discord API
 ./gradlew assembleRelease     # app/build/outputs/apk/release/app-release.apk
 ```
 
@@ -60,4 +81,5 @@ CI builds the APK only when Android changes are merged into `prime` (see
 The release build is signed with the debug key so it can be sideloaded directly; use your own
 signing config before distributing it.
 
-> Automating a user account is against Discord's Terms of Service. Use at your own risk.
+> Automating a user account is against Discord's Terms of Service. Use at your own risk. Mass
+> deletion is the kind of activity that's most likely to get noticed: a slower pace is safer.

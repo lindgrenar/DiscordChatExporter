@@ -12,7 +12,7 @@ import java.time.Duration
 
 class DiscordException(message: String, val isFatal: Boolean = false) : Exception(message)
 
-class CancelledException : Exception("Export cancelled.")
+class CancelledException : Exception("Cancelled.")
 
 /** Cooperative cancellation, checked between requests and while waiting out rate limits. */
 fun interface CancellationSignal {
@@ -47,8 +47,9 @@ object Http {
 
     private fun isRetryable(code: Int) = code == 429 || code == 408 || code >= 500
 
-    fun open(url: String, headers: Map<String, String>): Response {
+    fun open(url: String, headers: Map<String, String>, method: String = "GET"): Response {
         val connection = URL(url).openConnection() as HttpURLConnection
+        connection.requestMethod = method
         connection.connectTimeout = 30_000
         connection.readTimeout = 60_000
         connection.instanceFollowRedirects = true
@@ -62,11 +63,19 @@ object Http {
         return Response(code, responseHeaders, connection)
     }
 
-    /**
-     * Sends a GET request, retrying on network errors, 429, 408 and 5xx responses.
-     * The caller owns (and must close) the returned response.
-     */
     fun get(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        cancellation: CancellationSignal,
+        maxAttempts: Int = 9,
+    ): Response = send("GET", url, headers, cancellation, maxAttempts)
+
+    /**
+     * Sends a request, retrying on network errors, 429, 408 and 5xx responses.
+     * Only use it for idempotent methods (GET, DELETE). The caller owns (and must close) the returned response.
+     */
+    fun send(
+        method: String,
         url: String,
         headers: Map<String, String> = emptyMap(),
         cancellation: CancellationSignal,
@@ -77,7 +86,7 @@ object Http {
             cancellation.throwIfCancelled()
             attempt++
             val response = try {
-                open(url, headers)
+                open(url, headers, method)
             } catch (e: IOException) {
                 // A host that doesn't resolve isn't going to start resolving in a few seconds
                 if (attempt >= maxAttempts || e is UnknownHostException) throw e
@@ -104,8 +113,8 @@ class DiscordClient(
 ) {
     private var authHeader: String? = null
 
-    private fun request(path: String, auth: String): Http.Response {
-        val response = Http.get(baseUrl + path, mapOf("Authorization" to auth), cancellation)
+    private fun request(path: String, auth: String, method: String = "GET"): Http.Response {
+        val response = Http.send(method, baseUrl + path, mapOf("Authorization" to auth), cancellation)
 
         // Discord's advisory rate limits: if this was the last request in the bucket,
         // wait out the reset (capped, as Discord sometimes reports absurd values).
@@ -193,11 +202,44 @@ class DiscordClient(
 
     private fun parseMessages(text: String): List<Message> = JSONArray(text).objects().map(Message::parse)
 
+    /** The oldest message in the channel, or null if it's empty. */
+    fun tryGetFirstMessage(channelId: String): Message? =
+        tryGetText("channels/$channelId/messages?limit=1&after=0")?.let(::parseMessages)?.lastOrNull()
+
+    /** Up to 100 messages older than [before] (or the newest ones if null), newest first. */
+    fun getMessagesBefore(channelId: String, before: String?, limit: Int = 100): List<Message> =
+        parseMessages(getText("channels/$channelId/messages?limit=$limit" + before?.let { "&before=$it" }.orEmpty()))
+
+    enum class DeleteResult { Deleted, AlreadyGone, NotAllowed }
+
+    /** Deletes a message. Users can only delete their own messages, and not system messages such as calls. */
+    fun deleteMessage(channelId: String, messageId: String): DeleteResult {
+        val path = "channels/$channelId/messages/$messageId"
+        val response = request(path, resolveAuth(), method = "DELETE")
+        try {
+            return when {
+                response.isSuccess -> DeleteResult.Deleted
+                response.code == 404 -> DeleteResult.AlreadyGone
+                response.code == 403 || response.code == 400 -> DeleteResult.NotAllowed
+                response.code == 401 -> throw DiscordException("Authentication token is invalid.", isFatal = true)
+                else -> throw DiscordException("Deleting message $messageId failed: HTTP ${response.code}.\n${response.text().take(500)}")
+            }
+        } finally {
+            response.close()
+        }
+    }
+
     /**
      * Streams every message in the channel in chronological order.
      * Port of DiscordClient.GetMessagesAsync (forward direction, no range).
+     * [pageDelayMillis] adds a pause between pages of 100, on top of Discord's own rate limits.
      */
-    fun forEachMessage(channelId: String, onProgress: (Double) -> Unit, onMessage: (Message) -> Unit) {
+    fun forEachMessage(
+        channelId: String,
+        onProgress: (Double) -> Unit,
+        pageDelayMillis: Long = 0,
+        onMessage: (Message) -> Unit,
+    ) {
         // Snapshot the last message so that the range is fixed and progress can be calculated
         val omega = tryGetText("channels/$channelId/messages?limit=1")
             ?.let(::parseMessages)?.lastOrNull()
@@ -208,6 +250,7 @@ class DiscordClient(
 
         while (true) {
             cancellation.throwIfCancelled()
+            if (pageDelayMillis > 0 && boundary != "0") cancellation.sleep(pageDelayMillis)
 
             // Batches come newest to oldest; reverse for chronological order
             val messages = parseMessages(getText("channels/$channelId/messages?limit=100&after=$boundary")).reversed()

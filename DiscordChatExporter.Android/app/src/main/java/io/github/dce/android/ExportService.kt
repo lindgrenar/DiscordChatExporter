@@ -8,12 +8,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
-import android.provider.DocumentsContract
+import io.github.dce.android.archive.Archive
+import io.github.dce.android.archive.ArchiveEntry
+import io.github.dce.android.archive.Sharing
 import io.github.dce.android.discord.CancellationSignal
 import io.github.dce.android.discord.CancelledException
 import io.github.dce.android.discord.DiscordClient
@@ -23,11 +24,12 @@ import io.github.dce.android.export.ExportOptions
 import io.github.dce.android.export.ExportTheme
 import io.github.dce.android.export.TemplateSource
 import java.io.File
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Runs an export in the foreground so that long chats keep exporting while the app is in the background.
- * Only one export runs at a time.
+ * Exports are saved to the on-device [Archive]. Only one export runs at a time.
  */
 class ExportService : Service() {
     companion object {
@@ -40,6 +42,7 @@ class ExportService : Service() {
         private const val EXTRA_THEME = "theme"
         private const val EXTRA_DOWNLOAD = "download"
         private const val EXTRA_SINGLE_FILE = "single_file"
+        private const val EXTRA_PAGE_DELAY = "page_delay"
         private const val NOTIFICATION_CHANNEL = "export"
         private const val PROGRESS_NOTIFICATION_ID = 1
         private const val RESULT_NOTIFICATION_ID = 2
@@ -49,13 +52,10 @@ class ExportService : Service() {
             channelId: String,
             channelName: String,
             baseName: String,
-            output: Uri,
             options: ExportOptions,
         ) {
             val intent = Intent(context, ExportService::class.java)
                 .setAction(ACTION_START)
-                .setData(output)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                 .putExtra(EXTRA_CHANNEL_ID, channelId)
                 .putExtra(EXTRA_CHANNEL_NAME, channelName)
                 .putExtra(EXTRA_BASE_NAME, baseName)
@@ -63,6 +63,7 @@ class ExportService : Service() {
                 .putExtra(EXTRA_THEME, options.theme.name)
                 .putExtra(EXTRA_DOWNLOAD, options.downloadAssets)
                 .putExtra(EXTRA_SINGLE_FILE, options.singleFile)
+                .putExtra(EXTRA_PAGE_DELAY, options.pageDelayMillis)
             context.startForegroundService(intent)
         }
 
@@ -87,10 +88,9 @@ class ExportService : Service() {
             return START_NOT_STICKY
         }
 
-        val output = intent?.data
         val channelId = intent?.getStringExtra(EXTRA_CHANNEL_ID)
         val token = TokenStore.get(this)
-        if (output == null || channelId == null || token == null || worker != null) {
+        if (channelId == null || token == null || worker != null) {
             // Satisfy the startForegroundService() contract even when there's nothing to do
             startInForeground(buildProgressNotification("Preparing…", 0.0))
             if (worker == null) stopSelf()
@@ -104,13 +104,14 @@ class ExportService : Service() {
             theme = ExportTheme.valueOf(intent.getStringExtra(EXTRA_THEME) ?: ExportTheme.Dark.name),
             downloadAssets = intent.getBooleanExtra(EXTRA_DOWNLOAD, true),
             singleFile = intent.getBooleanExtra(EXTRA_SINGLE_FILE, true),
+            pageDelayMillis = intent.getLongExtra(EXTRA_PAGE_DELAY, 0L).coerceAtLeast(0),
         )
 
         cancelled.set(false)
         ExportState.update(ExportState.Snapshot(ExportState.Phase.Running, channelName))
         startInForeground(buildProgressNotification(channelName, 0.0))
 
-        worker = Thread({ runExport(token, channelId, channelName, baseName, output, options) }, "export").apply { start() }
+        worker = Thread({ runExport(token, channelId, channelName, baseName, options) }, "export").apply { start() }
         return START_NOT_STICKY
     }
 
@@ -119,15 +120,16 @@ class ExportService : Service() {
         channelId: String,
         channelName: String,
         baseName: String,
-        output: Uri,
         options: ExportOptions,
     ) {
         val wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dce:export")
             .apply { acquire(6 * 60 * 60 * 1000L) }
         val tempDir = File(cacheDir, "export-${System.currentTimeMillis()}")
-        val mimeType = options.outputMimeType
         val signal = CancellationSignal { cancelled.get() }
+        val archive = Archive.of(this)
+        archive.removeIncomplete()
+        val output = archive.begin("$baseName.${options.outputExtension}")
 
         val result = try {
             val client = DiscordClient(token, signal)
@@ -135,12 +137,8 @@ class ExportService : Service() {
             val channel = client.getChannel(channelId)
             val templates = TemplateSource { name -> assets.open(name).use { it.readBytes().toString(Charsets.UTF_8) } }
 
-            // Some storage providers don't support truncation ("wt"); the document is new anyway
-            val stream = runCatching { contentResolver.openOutputStream(output, "wt") }.getOrNull()
-                ?: contentResolver.openOutputStream(output, "w")
-                ?: error("Couldn't open the output file.")
             var lastUpdateAt = 0L
-            stream.use {
+            val exported = output.outputStream().use {
                 ChannelExporter(templates).export(client, channel, me, it, options, baseName, tempDir, signal) { progress ->
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastUpdateAt >= 200 || progress.fraction >= 1.0) {
@@ -152,12 +150,26 @@ class ExportService : Service() {
                     }
                 }
             }
-            ExportState.current.copy(phase = ExportState.Phase.Completed, fraction = 1.0, outputUri = output, outputMimeType = mimeType)
+            val entry = ArchiveEntry(
+                id = output.parentFile!!.name,
+                channelId = channel.id,
+                channelName = channelName,
+                fileName = output.name,
+                mimeType = options.outputMimeType,
+                createdAt = Instant.now(),
+                messages = exported.messages,
+                assets = exported.assets,
+                ownerId = me?.id,
+                ownMessages = exported.ownMessages,
+                lastMessageId = exported.lastMessageId,
+            )
+            archive.commit(entry)
+            ExportState.current.copy(phase = ExportState.Phase.Completed, fraction = 1.0, entryId = entry.id)
         } catch (e: CancelledException) {
-            deletePartialOutput(output)
+            archive.abort(output)
             ExportState.current.copy(phase = ExportState.Phase.Cancelled)
         } catch (e: Throwable) {
-            deletePartialOutput(output)
+            archive.abort(output)
             ExportState.current.copy(phase = ExportState.Phase.Failed, error = e.message ?: e.javaClass.simpleName)
         } finally {
             tempDir.deleteRecursively()
@@ -169,10 +181,6 @@ class ExportService : Service() {
         worker = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-    }
-
-    private fun deletePartialOutput(uri: Uri) {
-        runCatching { DocumentsContract.deleteDocument(contentResolver, uri) }
     }
 
     private fun createNotificationChannel() {
@@ -231,14 +239,26 @@ class ExportService : Service() {
             ExportState.Phase.Cancelled -> "Export cancelled"
             else -> "Export failed: ${snapshot.error}"
         }
-        val notification = Notification.Builder(this, NOTIFICATION_CHANNEL)
+        val builder = Notification.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(snapshot.channelName)
             .setContentText(text)
             .setAutoCancel(true)
             .setContentIntent(openAppIntent())
-            .build()
-        getSystemService(NotificationManager::class.java).notify(RESULT_NOTIFICATION_ID, notification)
+
+        // Share straight from the notification, e.g. to back the export up to Drive or Proton Drive
+        val entry = snapshot.entryId?.let { Archive.of(this).get(it) }
+        if (entry != null) {
+            fun action(requestCode: Int, label: String, intent: Intent) = Notification.Action.Builder(
+                null, label,
+                PendingIntent.getActivity(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT),
+            ).build()
+            Sharing.quickShareIntent(this, entry)?.let { quick ->
+                builder.addAction(action(3, "Send to ${Sharing.targetLabel(this)}", quick.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)))
+            }
+            builder.addAction(action(4, "Share…", Sharing.chooser(this, listOf(entry)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)))
+        }
+        getSystemService(NotificationManager::class.java).notify(RESULT_NOTIFICATION_ID, builder.build())
     }
 
     override fun onDestroy() {

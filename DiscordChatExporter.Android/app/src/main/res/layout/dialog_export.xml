@@ -127,5 +127,42 @@
                     android:text="Light" />
             </RadioGroup>
         </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Export pace"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/export_pace"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/export_pace_fast"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Fast · as fast as Discord allows" />
+
+            <RadioButton
+                android:id="@+id/export_pace_normal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Normal · 100 messages per second" />
+
+            <RadioButton
+                android:id="@+id/export_pace_gentle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Gentle · 100 messages every 3 s" />
+        </RadioGroup>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Separate from the pace for deleting messages, which is set in the archive."
+            android:textSize="12sp" />
     </LinearLayout>
 </ScrollView>
