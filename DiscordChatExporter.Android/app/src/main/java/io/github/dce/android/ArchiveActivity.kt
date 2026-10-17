@@ -207,6 +207,21 @@ class ArchiveActivity : Activity() {
         val estimate = view.findViewById<TextView>(R.id.estimate)
         val confirm = view.findViewById<CheckBox>(R.id.confirm)
 
+        // Start from the last pace used for deleting (exports have their own)
+        val lastInterval = Settings.deletionInterval(this)
+        pace.check(
+            when (lastInterval) {
+                5000L -> R.id.pace_gentle
+                2000L -> R.id.pace_normal
+                1000L -> R.id.pace_fast
+                else -> R.id.pace_custom
+            },
+        )
+        if (pace.checkedRadioButtonId == R.id.pace_custom) {
+            val seconds = lastInterval / 1000.0
+            customSeconds.setText(if (seconds == Math.floor(seconds)) seconds.toLong().toString() else seconds.toString())
+        }
+
         val until = dateFormat.format(Snowflake.toInstant(entry.lastMessageId).atZone(ZoneId.systemDefault()))
         val remaining = (entry.ownMessages - entry.deletedMessages).coerceAtLeast(0)
         view.findViewById<TextView>(R.id.delete_scope).text = buildString {
@@ -246,7 +261,9 @@ class ArchiveActivity : Activity() {
             .setTitle("Delete your messages in \"${entry.channelName}\"?")
             .setView(view)
             .setPositiveButton("Start deleting") { _, _ ->
-                pendingDeletion = entry to (intervalMillis() ?: return@setPositiveButton)
+                val interval = intervalMillis() ?: return@setPositiveButton
+                Settings.setDeletionInterval(this, interval)
+                pendingDeletion = entry to interval
                 requestNotificationPermissionThenDelete()
             }
             .setNegativeButton("Cancel", null)

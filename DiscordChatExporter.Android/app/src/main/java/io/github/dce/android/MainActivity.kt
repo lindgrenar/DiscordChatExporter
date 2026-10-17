@@ -271,6 +271,14 @@ class MainActivity : Activity() {
         val downloadHint = view.findViewById<TextView>(R.id.download_hint)
         val packagingSection = view.findViewById<View>(R.id.packaging_section)
         val themeSection = view.findViewById<View>(R.id.theme_section)
+        val pace = view.findViewById<RadioGroup>(R.id.export_pace)
+        pace.check(
+            when (Settings.exportPageDelay(this)) {
+                0L -> R.id.export_pace_fast
+                1000L -> R.id.export_pace_normal
+                else -> R.id.export_pace_gentle
+            },
+        )
 
         fun selectedFormat() = when (formatGroup.checkedRadioButtonId) {
             R.id.format_json -> ExportFormat.Json
@@ -305,7 +313,13 @@ class MainActivity : Activity() {
                     },
                     downloadAssets = download.isChecked,
                     singleFile = view.findViewById<RadioGroup>(R.id.packaging).checkedRadioButtonId != R.id.packaging_zip,
+                    pageDelayMillis = when (pace.checkedRadioButtonId) {
+                        R.id.export_pace_normal -> 1000L
+                        R.id.export_pace_gentle -> 3000L
+                        else -> 0L
+                    },
                 )
+                Settings.setExportPageDelay(this, options.pageDelayMillis)
                 pendingExport = PendingExport(channel, options)
                 requestNotificationPermissionThenExport()
             }

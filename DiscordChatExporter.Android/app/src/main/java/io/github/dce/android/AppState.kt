@@ -20,6 +20,27 @@ object TokenStore {
     }
 }
 
+/** Remembered choices. Exporting and deleting each keep their own pace. */
+object Settings {
+    private const val PREFS = "settings"
+    private const val KEY_EXPORT_PAGE_DELAY = "export_page_delay"
+    private const val KEY_DELETION_INTERVAL = "deletion_interval"
+
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Pause between pages of 100 messages while exporting; 0 is as fast as Discord allows. */
+    fun exportPageDelay(context: Context): Long = prefs(context).getLong(KEY_EXPORT_PAGE_DELAY, 0L)
+
+    fun setExportPageDelay(context: Context, millis: Long) =
+        prefs(context).edit().putLong(KEY_EXPORT_PAGE_DELAY, millis).apply()
+
+    /** Pause between deleted messages. */
+    fun deletionInterval(context: Context): Long = prefs(context).getLong(KEY_DELETION_INTERVAL, 2000L)
+
+    fun setDeletionInterval(context: Context, millis: Long) =
+        prefs(context).edit().putLong(KEY_DELETION_INTERVAL, millis).apply()
+}
+
 /** A value shared between a background service and the UI; listeners are called on the main thread. */
 open class ObservableState<T>(initial: T) {
     private val mainHandler = Handler(Looper.getMainLooper())

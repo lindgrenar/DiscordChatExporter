@@ -232,8 +232,14 @@ class DiscordClient(
     /**
      * Streams every message in the channel in chronological order.
      * Port of DiscordClient.GetMessagesAsync (forward direction, no range).
+     * [pageDelayMillis] adds a pause between pages of 100, on top of Discord's own rate limits.
      */
-    fun forEachMessage(channelId: String, onProgress: (Double) -> Unit, onMessage: (Message) -> Unit) {
+    fun forEachMessage(
+        channelId: String,
+        onProgress: (Double) -> Unit,
+        pageDelayMillis: Long = 0,
+        onMessage: (Message) -> Unit,
+    ) {
         // Snapshot the last message so that the range is fixed and progress can be calculated
         val omega = tryGetText("channels/$channelId/messages?limit=1")
             ?.let(::parseMessages)?.lastOrNull()
@@ -244,6 +250,7 @@ class DiscordClient(
 
         while (true) {
             cancellation.throwIfCancelled()
+            if (pageDelayMillis > 0 && boundary != "0") cancellation.sleep(pageDelayMillis)
 
             // Batches come newest to oldest; reverse for chronological order
             val messages = parseMessages(getText("channels/$channelId/messages?limit=100&after=$boundary")).reversed()

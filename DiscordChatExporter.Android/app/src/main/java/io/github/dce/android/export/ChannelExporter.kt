@@ -26,6 +26,8 @@ data class ExportOptions(
     val downloadAssets: Boolean = true,
     /** HTML only: embed downloaded assets in the .html file itself instead of packaging a ZIP. */
     val singleFile: Boolean = true,
+    /** Pause between pages of 100 messages; 0 goes as fast as Discord's rate limits allow. */
+    val pageDelayMillis: Long = 0,
 ) {
     /** Downloaded assets go into a ZIP next to the main file, except for single-file HTML. */
     val isZip get() = downloadAssets && !(format == ExportFormat.Html && singleFile)
@@ -90,6 +92,7 @@ class ChannelExporter(private val templates: TemplateSource) {
             client.forEachMessage(
                 channel.id,
                 onProgress = { lastFraction = it },
+                pageDelayMillis = options.pageDelayMillis,
                 onMessage = {
                     writer.writeMessage(it)
                     lastMessageId = it.id

@@ -42,6 +42,7 @@ class ExportService : Service() {
         private const val EXTRA_THEME = "theme"
         private const val EXTRA_DOWNLOAD = "download"
         private const val EXTRA_SINGLE_FILE = "single_file"
+        private const val EXTRA_PAGE_DELAY = "page_delay"
         private const val NOTIFICATION_CHANNEL = "export"
         private const val PROGRESS_NOTIFICATION_ID = 1
         private const val RESULT_NOTIFICATION_ID = 2
@@ -62,6 +63,7 @@ class ExportService : Service() {
                 .putExtra(EXTRA_THEME, options.theme.name)
                 .putExtra(EXTRA_DOWNLOAD, options.downloadAssets)
                 .putExtra(EXTRA_SINGLE_FILE, options.singleFile)
+                .putExtra(EXTRA_PAGE_DELAY, options.pageDelayMillis)
             context.startForegroundService(intent)
         }
 
@@ -102,6 +104,7 @@ class ExportService : Service() {
             theme = ExportTheme.valueOf(intent.getStringExtra(EXTRA_THEME) ?: ExportTheme.Dark.name),
             downloadAssets = intent.getBooleanExtra(EXTRA_DOWNLOAD, true),
             singleFile = intent.getBooleanExtra(EXTRA_SINGLE_FILE, true),
+            pageDelayMillis = intent.getLongExtra(EXTRA_PAGE_DELAY, 0L).coerceAtLeast(0),
         )
 
         cancelled.set(false)

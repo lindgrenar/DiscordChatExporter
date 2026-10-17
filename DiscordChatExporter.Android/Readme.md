@@ -21,6 +21,9 @@ conversation in full**, as **HTML, JSON or XML**, optionally with every attachme
     assets are stored once and decoded lazily as you scroll) or a ZIP.
   - On, JSON/XML: a **ZIP** with the data file plus a `<name>.<ext>_Files/` folder it links to,
     matching the desktop app's layout.
+- **Export pace**: *Fast* (as fast as Discord's rate limits allow), *Normal* (100 messages per
+  second) or *Gentle* (100 messages every 3 s). This is separate from the deletion pace below;
+  each one remembers its last setting.
 - Runs as a foreground service with a progress notification, so long chats keep exporting in
   the background. Exports can be cancelled; partial files are removed.
 - **Archive**: every export is saved on the device (in app-private storage) and listed under

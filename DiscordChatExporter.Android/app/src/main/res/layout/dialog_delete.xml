@@ -38,7 +38,6 @@
                 android:id="@+id/pace_normal"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:checked="true"
                 android:text="Normal · 1 message every 2 s" />
 
             <RadioButton
