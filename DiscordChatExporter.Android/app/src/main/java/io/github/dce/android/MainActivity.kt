@@ -5,7 +5,6 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
@@ -24,6 +23,7 @@ import android.widget.ProgressBar
 import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
+import io.github.dce.android.archive.Archive
 import io.github.dce.android.discord.Channel
 import io.github.dce.android.discord.DiscordClient
 import io.github.dce.android.discord.DiscordException
@@ -41,7 +41,6 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
     companion object {
         private const val REQUEST_LOGIN = 1
-        private const val REQUEST_CREATE_DOCUMENT = 2
         private const val REQUEST_NOTIFICATIONS = 3
     }
 
@@ -61,12 +60,13 @@ class MainActivity : Activity() {
     private lateinit var progressCancel: Button
     private lateinit var progressDismiss: Button
     private lateinit var progressShare: Button
+    private lateinit var progressQuickShare: Button
     private lateinit var progressOpen: Button
 
     private val adapter = ChannelAdapter()
     private var me: User? = null
     private var pendingExport: PendingExport? = null
-    private var dismissedOutput: Uri? = null
+    private var progressDismissed = false
     private val stateListener: (ExportState.Snapshot) -> Unit = ::renderExportState
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,7 +86,10 @@ class MainActivity : Activity() {
         progressCancel = findViewById(R.id.progress_cancel)
         progressDismiss = findViewById(R.id.progress_dismiss)
         progressShare = findViewById(R.id.progress_share)
+        progressQuickShare = findViewById(R.id.progress_quick_share)
         progressOpen = findViewById(R.id.progress_open)
+
+        findViewById<Button>(R.id.archive).setOnClickListener { startActivity(Intent(this, ArchiveActivity::class.java)) }
 
         findViewById<Button>(R.id.login_web).setOnClickListener {
             startActivityForResult(Intent(this, LoginActivity::class.java), REQUEST_LOGIN)
@@ -124,11 +127,12 @@ class MainActivity : Activity() {
 
         progressCancel.setOnClickListener { ExportService.cancel(this) }
         progressDismiss.setOnClickListener {
-            dismissedOutput = ExportState.current.outputUri ?: Uri.EMPTY
+            progressDismissed = true
             renderExportState(ExportState.current)
         }
-        progressShare.setOnClickListener { shareOutput() }
-        progressOpen.setOnClickListener { openOutput() }
+        progressShare.setOnClickListener { completedEntry()?.let { ArchiveUi.share(this, listOf(it)) } }
+        progressQuickShare.setOnClickListener { completedEntry()?.let { ArchiveUi.quickShare(this, it) } }
+        progressOpen.setOnClickListener { completedEntry()?.let { ArchiveUi.open(this, it) } }
 
         refreshAuthState()
     }
@@ -136,6 +140,12 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         ExportState.observe(stateListener)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The quick-share app may have changed in the share sheet
+        renderExportState(ExportState.current)
     }
 
     override fun onStop() {
@@ -285,7 +295,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Export \"${channel.name}\"")
             .setView(view)
-            .setPositiveButton("Choose location") { _, _ ->
+            .setPositiveButton("Export") { _, _ ->
                 val options = ExportOptions(
                     format = selectedFormat(),
                     theme = if (view.findViewById<RadioGroup>(R.id.theme).checkedRadioButtonId == R.id.theme_light) {
@@ -297,60 +307,47 @@ class MainActivity : Activity() {
                     singleFile = view.findViewById<RadioGroup>(R.id.packaging).checkedRadioButtonId != R.id.packaging_zip,
                 )
                 pendingExport = PendingExport(channel, options)
-                requestNotificationPermissionThenPickFile()
+                requestNotificationPermissionThenExport()
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun requestNotificationPermissionThenPickFile() {
+    private fun requestNotificationPermissionThenExport() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
         } else {
-            pickOutputFile()
+            startPendingExport()
         }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         // Progress notifications are nice to have; export either way
-        if (requestCode == REQUEST_NOTIFICATIONS) pickOutputFile()
+        if (requestCode == REQUEST_NOTIFICATIONS) startPendingExport()
     }
 
-    private fun pickOutputFile() {
+    private fun startPendingExport() {
         val export = pendingExport ?: return
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
-            .addCategory(Intent.CATEGORY_OPENABLE)
-            .setType(export.options.outputMimeType)
-            .putExtra(Intent.EXTRA_TITLE, "${export.baseName}.${export.options.outputExtension}")
-        startActivityForResult(intent, REQUEST_CREATE_DOCUMENT)
+        pendingExport = null
+        progressDismissed = false
+        ExportService.start(this, export.channel.id, export.channel.name, export.baseName, export.options)
     }
 
     @Deprecated("Framework Activity API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
-        when (requestCode) {
-            REQUEST_LOGIN -> data?.getStringExtra(LoginActivity.EXTRA_TOKEN)?.let(::signIn)
-            REQUEST_CREATE_DOCUMENT -> {
-                val uri = data?.data ?: return
-                val export = pendingExport ?: return
-                pendingExport = null
-                runCatching {
-                    contentResolver.takePersistableUriPermission(
-                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                    )
-                }
-                dismissedOutput = null
-                ExportService.start(this, export.channel.id, export.channel.name, export.baseName, uri, export.options)
-            }
+        if (resultCode == RESULT_OK && requestCode == REQUEST_LOGIN) {
+            data?.getStringExtra(LoginActivity.EXTRA_TOKEN)?.let(::signIn)
         }
     }
 
+    private fun completedEntry() = ExportState.current.entryId?.let { Archive.of(this).get(it) }
+
     private fun renderExportState(state: ExportState.Snapshot) {
-        val dismissed = state.phase != ExportState.Phase.Running && dismissedOutput != null
+        val dismissed = state.phase != ExportState.Phase.Running && progressDismissed
         progressPanel.visibility = if (state.phase == ExportState.Phase.Idle || dismissed) View.GONE else View.VISIBLE
 
         val counts = "${state.messages} messages · ${state.assets} files"
@@ -364,7 +361,7 @@ class MainActivity : Activity() {
             }
             ExportState.Phase.Completed -> {
                 progressTitle.text = "Exported ${state.channelName}"
-                progressText.text = counts
+                progressText.text = "$counts · saved to the archive"
                 progressBar.isIndeterminate = false
                 progressBar.progress = 1000
             }
@@ -388,29 +385,9 @@ class MainActivity : Activity() {
         progressDismiss.visibility = if (isRunning) View.GONE else View.VISIBLE
         progressShare.visibility = if (isDone) View.VISIBLE else View.GONE
         progressOpen.visibility = if (isDone) View.VISIBLE else View.GONE
-    }
-
-    private fun openOutput() {
-        val state = ExportState.current
-        val uri = state.outputUri ?: return
-        if (state.outputMimeType == "text/html") {
-            startActivity(Intent(this, ViewerActivity::class.java).setData(uri).putExtra(ViewerActivity.EXTRA_TITLE, state.channelName))
-        } else {
-            val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, state.outputMimeType)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            runCatching { startActivity(Intent.createChooser(intent, "Open with")) }
-                .onFailure { toast("No app can open this file.") }
-        }
-    }
-
-    private fun shareOutput() {
-        val state = ExportState.current
-        val uri = state.outputUri ?: return
-        val intent = Intent(Intent.ACTION_SEND)
-            .setType(state.outputMimeType)
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        startActivity(Intent.createChooser(intent, "Share export"))
+        val quickShare = if (isDone) ArchiveUi.quickShareLabel(this) else null
+        progressQuickShare.text = quickShare
+        progressQuickShare.visibility = if (quickShare != null) View.VISIBLE else View.GONE
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()

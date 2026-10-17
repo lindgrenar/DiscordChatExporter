@@ -1,7 +1,6 @@
 package io.github.dce.android
 
 import android.content.Context
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.CopyOnWriteArraySet
@@ -21,8 +20,32 @@ object TokenStore {
     }
 }
 
+/** A value shared between a background service and the UI; listeners are called on the main thread. */
+open class ObservableState<T>(initial: T) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val listeners = CopyOnWriteArraySet<(T) -> Unit>()
+
+    @Volatile
+    var current = initial
+        private set
+
+    fun update(snapshot: T) {
+        current = snapshot
+        mainHandler.post { listeners.forEach { it(snapshot) } }
+    }
+
+    fun observe(listener: (T) -> Unit) {
+        listeners += listener
+        listener(current)
+    }
+
+    fun unobserve(listener: (T) -> Unit) {
+        listeners -= listener
+    }
+}
+
 /** Export progress shared between [ExportService] and the UI. */
-object ExportState {
+object ExportState : ObservableState<ExportState.Snapshot>(ExportState.Snapshot()) {
     enum class Phase { Idle, Running, Completed, Failed, Cancelled }
 
     data class Snapshot(
@@ -32,28 +55,28 @@ object ExportState {
         val messages: Long = 0,
         val assets: Int = 0,
         val error: String? = null,
-        val outputUri: Uri? = null,
-        val outputMimeType: String? = null,
+        /** The archive entry, once the export has completed. */
+        val entryId: String? = null,
     )
+}
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val listeners = CopyOnWriteArraySet<(Snapshot) -> Unit>()
+/** Progress of deleting messages, shared between [DeletionService] and the UI. */
+object DeletionState : ObservableState<DeletionState.Snapshot>(DeletionState.Snapshot()) {
+    enum class Phase { Idle, Running, Completed, Failed, Stopped }
 
-    @Volatile
-    var current = Snapshot()
-        private set
-
-    fun update(snapshot: Snapshot) {
-        current = snapshot
-        mainHandler.post { listeners.forEach { it(snapshot) } }
-    }
-
-    fun observe(listener: (Snapshot) -> Unit) {
-        listeners += listener
-        listener(current)
-    }
-
-    fun unobserve(listener: (Snapshot) -> Unit) {
-        listeners -= listener
+    data class Snapshot(
+        val phase: Phase = Phase.Idle,
+        val entryId: String? = null,
+        val channelName: String = "",
+        val intervalMillis: Long = 0,
+        /** Own messages in the export, for an estimate of what's left. */
+        val expected: Long = 0,
+        val scanned: Long = 0,
+        val deleted: Long = 0,
+        val skipped: Long = 0,
+        val fraction: Double = 0.0,
+        val error: String? = null,
+    ) {
+        val remainingEstimate get() = (expected - deleted - skipped).coerceAtLeast(0)
     }
 }

@@ -135,11 +135,15 @@ class ExportEndToEndTest {
         val output = ByteArrayOutputStream()
         val tempDir = Files.createTempDirectory("dce-test").toFile()
         var lastProgress: ExportProgress? = null
-        ChannelExporter(templates).export(
+        val result = ChannelExporter(templates).export(
             client, channel, client.getCurrentUser(), output, options,
             ChannelExporter.defaultBaseName(channel), tempDir, cancellation,
         ) { lastProgress = it }
         assertEquals(250L, lastProgress?.messages)
+        assertEquals(250L, result.messages)
+        // Every other message is from "me"
+        assertEquals(125L, result.ownMessages)
+        assertEquals(messages.last().getString("id"), result.lastMessageId)
         assertEquals(1.0, lastProgress!!.fraction, 0.0)
         tempDir.deleteRecursively()
         return output.toByteArray()

@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -32,6 +33,12 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
 
         <activity
+            android:name=".ArchiveActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
+
+        <activity
             android:name=".ViewerActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
@@ -40,5 +47,26 @@
             android:name=".ExportService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Can run for many hours at a slow pace, so it uses specialUse on Android 14+ (dataSync is capped at 6 h a day on 15+) -->
+        <service
+            android:name=".DeletionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Deletes the user's own chat messages one at a time, at a user-chosen pace, which can take many hours." />
+        </service>
+
+        <!-- Serves archived exports to the apps they're shared with (Drive, Proton Drive, …), via per-URI grants only -->
+        <provider
+            android:name=".archive.ArchiveProvider"
+            android:authorities="${applicationId}.archive"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <receiver
+            android:name=".archive.ShareTargetReceiver"
+            android:exported="false" />
     </application>
 </manifest>

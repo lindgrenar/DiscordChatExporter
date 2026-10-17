@@ -35,6 +35,14 @@ data class ExportOptions(
 
 data class ExportProgress(val fraction: Double, val messages: Long, val assets: Int)
 
+data class ExportResult(
+    val messages: Long,
+    val assets: Int,
+    /** Messages sent by the exporting user. */
+    val ownMessages: Long,
+    val lastMessageId: String?,
+)
+
 /** Loads the bundled stylesheet and scripts (theme-dark.css, theme-light.css, head.html). */
 fun interface TemplateSource {
     fun read(name: String): String
@@ -58,7 +66,7 @@ class ChannelExporter(private val templates: TemplateSource) {
         tempDir: File,
         cancellation: CancellationSignal,
         onProgress: (ExportProgress) -> Unit,
-    ) {
+    ): ExportResult {
         val downloader = AssetDownloader(File(tempDir, "assets"), cancellation)
 
         fun createWriter(stream: OutputStream, context: ExportContext, assets: AssetSink, trailer: String): MessageWriter =
@@ -73,33 +81,36 @@ class ChannelExporter(private val templates: TemplateSource) {
                 ExportFormat.Xml -> DataWriter(stream, isXml = true, context, assets)
             }
 
-        fun run(stream: OutputStream, assets: AssetSink, trailer: String = "") {
+        fun run(stream: OutputStream, assets: AssetSink, trailer: String = ""): ExportResult {
             val writer = createWriter(stream, ExportContext(client, assets), assets, trailer)
             writer.writePreamble(channel, me)
             var lastFraction = 0.0
+            var ownMessages = 0L
+            var lastMessageId: String? = null
             client.forEachMessage(
                 channel.id,
                 onProgress = { lastFraction = it },
                 onMessage = {
                     writer.writeMessage(it)
+                    lastMessageId = it.id
+                    if (it.author.id == me?.id) ownMessages++
                     onProgress(ExportProgress(lastFraction, writer.messagesWritten, assets.count))
                 },
             )
             writer.writePostamble()
             onProgress(ExportProgress(1.0, writer.messagesWritten, assets.count))
+            return ExportResult(writer.messagesWritten, assets.count, ownMessages, lastMessageId)
         }
 
-        when {
+        return when {
             !options.downloadAssets -> {
                 val stream = BufferedOutputStream(output, 64 * 1024)
-                run(stream, LinkedAssetSink)
-                stream.flush()
+                run(stream, LinkedAssetSink).also { stream.flush() }
             }
 
             !options.isZip -> {
                 val stream = BufferedOutputStream(output, 64 * 1024)
-                run(stream, EmbeddedAssetSink(downloader), EmbeddedAssetSink.RESOLVER_SCRIPT)
-                stream.flush()
+                run(stream, EmbeddedAssetSink(downloader), EmbeddedAssetSink.RESOLVER_SCRIPT).also { stream.flush() }
             }
 
             else -> {
@@ -109,7 +120,7 @@ class ChannelExporter(private val templates: TemplateSource) {
                 val zip = ZipOutputStream(BufferedOutputStream(output, 64 * 1024))
                 val staged = File(tempDir, "export.tmp")
                 tempDir.mkdirs()
-                staged.outputStream().buffered().use { stream ->
+                val result = staged.outputStream().buffered().use { stream ->
                     run(stream, ZipAssetSink(downloader, zip, "${fileName}_Files"))
                 }
                 zip.setLevel(Deflater.DEFAULT_COMPRESSION)
@@ -119,6 +130,7 @@ class ChannelExporter(private val templates: TemplateSource) {
                 zip.finish()
                 zip.flush()
                 staged.delete()
+                result
             }
         }
     }
